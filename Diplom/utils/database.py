@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 import asyncio
+from datetime import datetime
 
 # Инициализация логирования
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +21,9 @@ def init_db():
                             days TEXT,
                             dose_count INTEGER,
                             times TEXT,
-                            dosage INTEGER  -- Новое поле для дозировки
+                            dosage INTEGER,
+                            start_date TEXT,
+                            end_date TEXT
                         )''')
 
         # Создание новой таблицы для учета запаса таблеток
@@ -47,9 +50,11 @@ async def save_medicine_reminder(data, user_id):
     dose_count = data.get('doses_per_day', 0)
     times = ','.join(data.get('times', []))  # Преобразуем список времен в строку
     dosage = data.get('dosage', 1)  # Получаем значение дозировки, по умолчанию 1
+    start_date = data.get('start_date', '')
+    end_date = data.get('end_date', '')
 
     # Проверка данных
-    if not name or not duration or not days or not times:
+    if not name or not duration or not days or not times or not start_date or not end_date:
         logging.error("Недостаточно данных для сохранения напоминания.")
         return
 
@@ -59,13 +64,59 @@ async def save_medicine_reminder(data, user_id):
             with sqlite3.connect("data/medicine_reminders.db") as connection:
                 cursor = connection.cursor()
                 cursor.execute("""
-                    INSERT INTO medicine_reminders (user_id, name, notes, duration, days, dose_count, times, dosage)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (user_id, name, notes, duration, days, dose_count, times, dosage))
+                    INSERT INTO medicine_reminders (user_id, name, notes, duration, days, dose_count, times, dosage, start_date, end_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (user_id, name, notes, duration, days, dose_count, times, dosage, start_date, end_date))
                 connection.commit()
             logging.info(f"Напоминание для пользователя {user_id} успешно сохранено.")
         except sqlite3.Error as e:
             logging.error(f"Ошибка при сохранении напоминания: {e}")
+
+# Функция для получения активных напоминаний
+def get_active_reminders():
+    try:
+        with sqlite3.connect("data/medicine_reminders.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, name, notes, duration, days, dose_count, times, dosage, start_date, end_date FROM medicine_reminders")
+            reminders = cursor.fetchall()
+
+        # Логирование данных для проверки
+        logging.info(f"Полученные напоминания: {reminders}")
+
+        # Преобразование данных в словарь для удобства
+        active_reminders = []
+        for reminder in reminders:
+            active_reminders.append({
+                'user_id': reminder[0],
+                'name': reminder[1],
+                'notes': reminder[2],
+                'duration': reminder[3],
+                'days': reminder[4],
+                'dose_count': reminder[5],
+                'times': reminder[6],
+                'dosage': reminder[7],
+                'start_date': reminder[8],
+                'end_date': reminder[9]
+            })
+
+        return active_reminders
+    except sqlite3.Error as e:
+        logging.error(f"Ошибка при получении активных напоминаний: {e}")
+        return []
+
+# Функция для удаления напоминания
+def delete_reminder_from_db(user_id, name, notes, duration, days, dose_count, times, dosage):
+    try:
+        with sqlite3.connect("data/medicine_reminders.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM medicine_reminders
+                WHERE user_id = ? AND name = ? AND notes = ? AND duration = ? AND days = ? AND dose_count = ? AND times = ? AND dosage = ?
+            """, (user_id, name, notes, duration, days, dose_count, times, dosage))
+            conn.commit()
+        logging.info(f"Напоминание для пользователя {user_id} успешно удалено.")
+    except sqlite3.Error as e:
+        logging.error(f"Ошибка при удалении напоминания: {e}")
 
 # Функция для добавления запаса таблеток в базу данных
 async def add_medicine_stock(user_id, name, tablet_count, pack_count):
@@ -81,50 +132,6 @@ async def add_medicine_stock(user_id, name, tablet_count, pack_count):
             logging.info(f"Запас для {name} успешно добавлен для пользователя {user_id}.")
         except sqlite3.Error as e:
             logging.error(f"Ошибка при добавлении запаса: {e}")
-
-# Функция для получения активных напоминаний
-def get_active_reminders(user_id):
-    try:
-        with sqlite3.connect("data/medicine_reminders.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id, name, notes, duration, days, dose_count, times, dosage FROM medicine_reminders WHERE user_id = ?", (user_id,))
-            reminders = cursor.fetchall()
-
-        # Логирование данных для проверки
-        logging.info(f"Полученные напоминания для пользователя {user_id}: {reminders}")
-
-        # Преобразование данных в словарь для удобства
-        active_reminders = []
-        for reminder in reminders:
-            active_reminders.append({
-                'user_id': reminder[0],
-                'name': reminder[1],
-                'notes': reminder[2],
-                'duration': reminder[3],
-                'days': reminder[4],
-                'dose_count': reminder[5],
-                'times': reminder[6],
-                'dosage': reminder[7]  # Новое поле дозировки
-            })
-
-        return active_reminders
-    except sqlite3.Error as e:
-        logging.error(f"Ошибка при получении активных напоминаний: {e}")
-        return []
-
-# Функция для удаления напоминания
-def delete_reminder_from_db(reminder_id, name, notes, duration, days, dose_count, times, dosage):
-    try:
-        with sqlite3.connect("data/medicine_reminders.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                DELETE FROM medicine_reminders
-                WHERE user_id = ? AND name = ? AND notes = ? AND duration = ? AND days = ? AND dose_count = ? AND times = ? AND dosage = ?
-            """, (reminder_id, name, notes, duration, days, dose_count, times, dosage))
-            conn.commit()
-        logging.info(f"Напоминание с ID {reminder_id} успешно удалено.")
-    except sqlite3.Error as e:
-        logging.error(f"Ошибка при удалении напоминания: {e}")
 
 # Функция для получения запасов таблеток
 async def get_medicine_stock(user_id):

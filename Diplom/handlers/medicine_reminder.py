@@ -11,6 +11,7 @@ from keyboards.medicine_keyboards import (
     get_dosage_keyboard
 )
 from utils.database import save_medicine_reminder, get_active_reminders, delete_reminder_from_db
+from datetime import datetime, timedelta
 
 # Определяем состояния
 class MedicineReminder(StatesGroup):
@@ -158,6 +159,21 @@ async def set_times(callback_query: types.CallbackQuery, state: FSMContext):
                 reply_markup=get_time_selection_keyboard(data['times'])
             )
         else:
+            # Установка start_date и end_date
+            start_date = datetime.now().strftime('%Y-%m-%d')
+            duration = data['duration']
+            if "неделя" or "недели" in duration:
+                weeks = int(duration.split()[0])
+                end_date = (datetime.now() + timedelta(weeks=weeks)).strftime('%Y-%m-%d')
+            elif "месяц" or "месяца" or "месяцев" in duration:
+                months = int(duration.split()[0])
+                end_date = (datetime.now() + timedelta(days=30*months)).strftime('%Y-%m-%d')
+            else:
+                end_date = start_date  # Если duration не распознан, устанавливаем end_date равным start_date
+
+            data['start_date'] = start_date
+            data['end_date'] = end_date
+
             await save_medicine_reminder(data, callback_query.from_user.id)
             await callback_query.message.answer("Напоминание успешно сохранено!")
             await state.finish()
@@ -165,7 +181,7 @@ async def set_times(callback_query: types.CallbackQuery, state: FSMContext):
 
 # Обработчик для просмотра напоминаний
 async def view_reminders(callback_query: types.CallbackQuery):
-    reminders = get_active_reminders(callback_query.from_user.id)
+    reminders = get_active_reminders()
     if not reminders:
         await callback_query.message.answer("У вас нет активных напоминаний.")
         await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
@@ -186,12 +202,12 @@ async def confirm_delete_reminder(callback_query: types.CallbackQuery, state: FS
 # Обработчик для удаления напоминания
 async def delete_reminder(callback_query: types.CallbackQuery, state: FSMContext):
     reminder_id = int(callback_query.data.split('_')[1])
-    reminders = get_active_reminders(callback_query.from_user.id)
+    reminders = get_active_reminders()
     reminder = next((r for r in reminders if r['user_id'] == reminder_id), None)
 
     if reminder:
         delete_reminder_from_db(
-            reminder_id,
+            reminder['user_id'],
             reminder['name'],
             reminder['notes'],
             reminder['duration'],
