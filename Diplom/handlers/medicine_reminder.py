@@ -2,13 +2,14 @@ from aiogram import types, Dispatcher
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from keyboards.medicine_keyboards import (
+from keyboards.keyboards import (
     get_start_keyboard,
     get_duration_keyboard,
     get_days_keyboard,
     get_time_selection_keyboard,
     get_reminders_keyboard,
-    get_dosage_keyboard
+    get_dosage_keyboard,
+    get_reminders_menu_keyboard
 )
 from utils.database import save_medicine_reminder, get_active_reminders, delete_reminder_from_db
 from datetime import datetime, timedelta
@@ -25,9 +26,9 @@ class MedicineReminder(StatesGroup):
     view_reminders = State()
     confirm_delete = State()
 
-# Начало создания напоминания
-async def start_reminder(message: types.Message):
-    await message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+# Обработчик для кнопки "Напоминания"
+async def reminders_menu(callback_query: types.CallbackQuery):
+    await callback_query.message.answer("Меню напоминаний:", reply_markup=get_reminders_menu_keyboard())
 
 # Обработчик для создания напоминания
 async def initiate_medicine_reminder(callback_query: types.CallbackQuery):
@@ -196,7 +197,7 @@ async def confirm_delete_reminder(callback_query: types.CallbackQuery, state: FS
     keyboard = InlineKeyboardMarkup()
     keyboard.add(InlineKeyboardButton("Да", callback_data=f"delete_{reminder_id}"))
     keyboard.add(InlineKeyboardButton("Нет", callback_data="cancel_delete"))
-    await callback_query.message.answer(f"Вы уверены, что хотите удалить напоминание с ID {reminder_id}?", reply_markup=keyboard)
+    await callback_query.message.answer(f"Вы уверены, что хотите удалить напоминание?", reply_markup=keyboard)
     await MedicineReminder.confirm_delete.set()
 
 # Обработчик для удаления напоминания
@@ -231,22 +232,14 @@ async def cancel_delete_reminder(callback_query: types.CallbackQuery, state: FSM
 
 # Обработчик для кнопки "Назад" в просмотре напоминаний
 async def back_to_start(callback_query: types.CallbackQuery, state: FSMContext):
-    await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+    await callback_query.message.answer("Выберите действие:", reply_markup=get_start_keyboard())
     await state.finish()
 
-# Регистрация обработчиков
-def register_handlers(dp: Dispatcher):
-    dp.register_message_handler(start_reminder, commands="start", state="*")
-    dp.register_callback_query_handler(initiate_medicine_reminder, text="create_reminder", state="*")
-    dp.register_message_handler(set_medicine_name, state=MedicineReminder.name)
-    dp.register_message_handler(set_medicine_notes, state=MedicineReminder.notes)
-    dp.register_callback_query_handler(set_duration, state=MedicineReminder.duration)
-    dp.register_callback_query_handler(set_days_of_week, state=MedicineReminder.days_of_week)
-    dp.register_message_handler(set_doses_per_day, state=MedicineReminder.doses_per_day)
-    dp.register_callback_query_handler(set_dosage, state=MedicineReminder.dosage)
-    dp.register_callback_query_handler(set_times, state=MedicineReminder.times)
-    dp.register_callback_query_handler(view_reminders, text="view_reminders", state="*")
-    dp.register_callback_query_handler(confirm_delete_reminder, text_contains="confirm_delete_", state=MedicineReminder.view_reminders)
-    dp.register_callback_query_handler(delete_reminder, text_contains="delete_", state=MedicineReminder.confirm_delete)
-    dp.register_callback_query_handler(cancel_delete_reminder, text="cancel_delete", state=MedicineReminder.confirm_delete)
-    dp.register_callback_query_handler(back_to_start, text="back", state="*")
+# Обработчик для кнопки "Назад" в просмотре таблеток
+async def back_to_reminders(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.answer("Меню напоминаний:", reply_markup=get_reminders_menu_keyboard())
+    await state.finish()
+
+
+
+

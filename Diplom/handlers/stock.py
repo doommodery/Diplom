@@ -1,10 +1,11 @@
 from aiogram import types, Dispatcher
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from keyboards.medicine_keyboards import (
+from keyboards.keyboards import (
     get_start_keyboard,
     get_view_stock_keyboard,
-    get_edit_stock_keyboard
+    get_edit_stock_keyboard,
+    get_pills_menu_keyboard
 )
 from utils.database import add_medicine_stock, get_medicine_stock, update_medicine_stock, delete_medicine_stock
 
@@ -17,6 +18,10 @@ class Stock(StatesGroup):
     edit_stock_name = State()
     edit_tablet_count = State()
     edit_pack_count = State()
+
+# Обработчик для кнопки "Таблетки"
+async def pills_menu(callback_query: types.CallbackQuery):
+    await callback_query.message.answer("Меню таблеток:", reply_markup=get_pills_menu_keyboard())
 
 # Обработчик для добавления запаса таблеток
 async def initiate_add_stock(callback_query: types.CallbackQuery):
@@ -205,18 +210,15 @@ async def delete_stock(callback_query: types.CallbackQuery, state: FSMContext):
     await view_stock(callback_query)
     await state.finish()
 
-# Регистрация обработчиков
-def register_handlers(dp: Dispatcher):
-    dp.register_callback_query_handler(initiate_add_stock, text="add_stock", state="*")
-    dp.register_message_handler(set_stock_name, state=Stock.stock_name)
-    dp.register_message_handler(set_tablet_count, state=Stock.tablet_count)
-    dp.register_message_handler(set_pack_count, state=Stock.pack_count)
-    dp.register_callback_query_handler(view_stock, text="view_stock", state="*")
-    dp.register_callback_query_handler(edit_stock, text_contains="edit_stock_", state=Stock.view_stock)
-    dp.register_callback_query_handler(edit_stock_name, text="edit_name", state=Stock.edit_stock_name)
-    dp.register_message_handler(set_edit_stock_name, state=Stock.edit_stock_name)
-    dp.register_callback_query_handler(edit_tablet_count, text="edit_tablet_count", state=Stock.edit_stock_name)
-    dp.register_message_handler(set_edit_tablet_count, state=Stock.edit_tablet_count)
-    dp.register_callback_query_handler(edit_pack_count, text="edit_pack_count", state=Stock.edit_stock_name)
-    dp.register_message_handler(set_edit_pack_count, state=Stock.edit_pack_count)
-    dp.register_callback_query_handler(delete_stock, text_contains="delete_stock_", state=Stock.view_stock)
+# Обработчик для кнопки "Назад" в просмотре таблеток
+async def back_to_start(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.answer("Выберите действие:", reply_markup=get_start_keyboard())
+    await state.finish()
+
+# Обработчик для кнопки "Назад" в просмотре таблеток
+async def back_to_pills(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.answer("Меню таблеток:", reply_markup=get_pills_menu_keyboard())
+    await state.finish()
+
+
+    

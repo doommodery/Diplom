@@ -40,7 +40,7 @@ if __name__ == "__main__":
         # Пример добавления тестового напоминания
         test_user_id = 1977126086  # Замените на реальный ID пользователя
         test_message = "Это тестовое напоминание!"
-        test_date_time = datetime(2024, 11, 25, 16, 20)  # Замените на нужное время
+        test_date_time = datetime(2024, 12, 3, 19, 18)  # Замените на нужное время
 
         add_test_reminder(test_user_id, test_message, test_date_time)
 
