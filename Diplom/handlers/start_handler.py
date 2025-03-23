@@ -1,8 +1,8 @@
 from aiogram import types, Dispatcher
 from keyboards.keyboards import get_start_keyboard
-
 from handlers.medicine_reminder import MedicineReminder,initiate_medicine_reminder,set_medicine_name,set_medicine_notes,set_duration,set_days_of_week,set_doses_per_day,set_dosage,set_times,view_reminders,confirm_delete_reminder,delete_reminder,cancel_delete_reminder,back_to_start,reminders_menu,back_to_reminders
 from handlers.stock import Stock,initiate_add_stock,set_stock_name,set_tablet_count,set_pack_count,view_stock,edit_stock,edit_stock_name,set_edit_stock_name,edit_tablet_count,set_edit_tablet_count,edit_pack_count,set_edit_pack_count,delete_stock, back_to_pills,pills_menu
+from handlers.user_inf_handler import UserInfo,handle_personal_data,handle_city,handle_health_info
 import logging  # Для логирования
 
 # Обработчик команды /start
@@ -12,11 +12,11 @@ async def start(message: types.Message):
         await message.answer(
             "Бот запущен и готов к работе! Выберите действие:",
             reply_markup=get_start_keyboard()  # Отправляем клавиатуру
+        
         )
+
     except Exception as e:
         logging.error(f"Ошибка при обработке команды /start: {e}")
-
-
 
 # Регистрация обработчика
 def register_handlers_start(dp: Dispatcher):
@@ -53,3 +53,6 @@ def register_handlers_start(dp: Dispatcher):
     dp.register_callback_query_handler(back_to_pills, text="cancel_pills", state="*")
     dp.register_callback_query_handler(back_to_pills, text="back_pills", state="*")
     dp.register_callback_query_handler(back_to_reminders, text="back_reminders", state="*")
+    dp.register_callback_query_handler(handle_personal_data, text="add_user_inf")  
+    dp.register_message_handler(handle_city, state=UserInfo.city)  
+    dp.register_message_handler(handle_health_info, state=UserInfo.health_info)  

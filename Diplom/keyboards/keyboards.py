@@ -1,5 +1,8 @@
 import logging
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import pytz
+from datetime import datetime
+from config import SERVER_TIMEZONE
 
 # Инициализация логирования
 logging.basicConfig(level=logging.INFO)
@@ -13,10 +16,42 @@ def create_inline_keyboard(buttons, row_width=2):
 def get_start_keyboard():
     buttons = [
         InlineKeyboardButton("Напоминания", callback_data="menu_reminders"),
-        InlineKeyboardButton("Таблетки", callback_data="menu_pills")
+        InlineKeyboardButton("Таблетки", callback_data="menu_pills"),
+        InlineKeyboardButton("Здоровье", callback_data="menu_health"),
+        InlineKeyboardButton("Личные данные", callback_data="add_user_inf"),
     ]
     return create_inline_keyboard(buttons)
 
+# Кнопки для раздела "Здоровье"
+def get_health_keyboard():
+    buttons = [
+        InlineKeyboardButton("Сделать запись о состоянии здоровья", callback_data="record_health"),
+        InlineKeyboardButton("Проанализировать состояние здоровья", callback_data="analyze_health"),
+        InlineKeyboardButton("Подготовить отчёт", callback_data="report_health"),
+        InlineKeyboardButton("Назад", callback_data="back_to_main")
+    ]
+    return create_inline_keyboard(buttons)
+
+# Клавиатура для выбора временного промежутка
+def get_report_days_keyboard():
+    buttons = [
+        InlineKeyboardButton("1 день", callback_data="report_1_day"),
+        InlineKeyboardButton("7 дней", callback_data="report_7_days"),
+        InlineKeyboardButton("14 дней", callback_data="report_14_days"),
+        InlineKeyboardButton("30 дней", callback_data="report_30_days"),
+        InlineKeyboardButton("Назад", callback_data="back_to_health")
+    ]
+    return create_inline_keyboard(buttons)
+
+# Кнопки для раздела отчётов
+def get_report_keyboard():
+    buttons = [
+        InlineKeyboardButton("Отправить отчёт", callback_data="record_health"),
+        InlineKeyboardButton("Загрузить отчёт", callback_data="analyze_health"),
+        InlineKeyboardButton("Назад", callback_data="back_to_health") 
+        ]
+    return create_inline_keyboard(buttons)
+    
 # Подменю для работы с напоминаниями
 def get_reminders_menu_keyboard():
     buttons = [
@@ -73,9 +108,43 @@ def get_time_selection_keyboard(selected_times):
     buttons.append(InlineKeyboardButton("Отменить создание", callback_data="cancel_reminders"))
     return create_inline_keyboard(buttons, row_width=4)
 
-def get_reminders_keyboard(reminders):
-    buttons = [InlineKeyboardButton(f"{reminder['name']} - {reminder['times']} - {reminder['days']}", callback_data=f"confirm_delete_{reminder['user_id']}") for reminder in reminders]
+def get_reminders_keyboard(reminders, user_timezone):
+    buttons = []
+    for reminder in reminders:
+        # Получаем строку с временами (например, "12:00,17:00")
+        times = reminder['times']
+        
+        # Разделяем строку на отдельные времена
+        time_list = times.split(",")
+        
+        # Преобразуем каждое время с учетом временной зоны пользователя
+        formatted_times = []
+        for time_str in time_list:
+            # Преобразуем время в объект datetime
+            time_obj = datetime.strptime(time_str.strip(), "%H:%M")
+            
+            # Локализуем время в серверной временной зоне
+            server_time = SERVER_TIMEZONE.localize(
+                datetime.now().replace(hour=time_obj.hour, minute=time_obj.minute)
+            )
+            
+            # Преобразуем время в временную зону пользователя
+            user_time = server_time.astimezone(user_timezone)
+            
+            # Форматируем время для вывода
+            formatted_time = user_time.strftime("%H:%M")
+            formatted_times.append(formatted_time)
+        
+        # Объединяем преобразованные времена обратно в строку
+        formatted_times_str = ", ".join(formatted_times)
+        
+        # Создаем кнопку с преобразованным временем
+        button_text = f"{reminder['name']} - {formatted_times_str} - {reminder['days']}"
+        buttons.append(InlineKeyboardButton(button_text, callback_data=f"confirm_delete_{reminder['user_id']}"))
+    
+    # Добавляем кнопку "Назад"
     buttons.append(InlineKeyboardButton("Назад", callback_data="back_reminders"))
+    
     return create_inline_keyboard(buttons)
 
 def get_stock_keyboard():

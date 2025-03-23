@@ -13,6 +13,9 @@ from keyboards.keyboards import (
 )
 from utils.database import save_medicine_reminder, get_active_reminders, delete_reminder_from_db
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from config import SERVER_TIMEZONE, DB_PATH
+import sqlite3, pytz
 
 # Определяем состояния
 class MedicineReminder(StatesGroup):
@@ -52,7 +55,7 @@ async def set_medicine_notes(message: types.Message, state: FSMContext):
 # Установка срока приема
 async def set_duration(callback_query: types.CallbackQuery, state: FSMContext):
     if callback_query.data == "back":
-        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_reminders_menu_keyboard())
         await state.finish()
         return
     elif callback_query.data == "cancel":
@@ -77,7 +80,7 @@ async def set_days_of_week(callback_query: types.CallbackQuery, state: FSMContex
         return
     elif callback_query.data == "cancel":
         await callback_query.message.answer("Создание напоминания отменено.")
-        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_reminders_menu_keyboard())
         await state.finish()
         return
 
@@ -129,7 +132,7 @@ async def set_dosage(callback_query: types.CallbackQuery, state: FSMContext):
         return
     elif callback_query.data == "cancel":
         await callback_query.message.answer("Создание напоминания отменено.")
-        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_reminders_menu_keyboard())
         await state.finish()
         return
 
@@ -146,7 +149,7 @@ async def set_times(callback_query: types.CallbackQuery, state: FSMContext):
         return
     elif callback_query.data == "cancel":
         await callback_query.message.answer("Создание напоминания отменено.")
-        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_reminders_menu_keyboard())
         await state.finish()
         return
 
@@ -163,14 +166,18 @@ async def set_times(callback_query: types.CallbackQuery, state: FSMContext):
             # Установка start_date и end_date
             start_date = datetime.now().strftime('%Y-%m-%d')
             duration = data['duration']
-            if "неделя" or "недели" in duration:
-                weeks = int(duration.split()[0])
-                end_date = (datetime.now() + timedelta(weeks=weeks)).strftime('%Y-%m-%d')
-            elif "месяц" or "месяца" or "месяцев" in duration:
-                months = int(duration.split()[0])
-                end_date = (datetime.now() + timedelta(days=30*months)).strftime('%Y-%m-%d')
+
+            # Определяем end_date на основе duration
+            if duration == "1 неделя":
+                end_date = (datetime.now() + timedelta(weeks=1)).strftime('%Y-%m-%d')
+            elif duration == "2 недели":
+                end_date = (datetime.now() + timedelta(weeks=2)).strftime('%Y-%m-%d')
+            elif duration == "1 месяц":
+                end_date = (datetime.now() + relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif duration == "3 месяца":
+                end_date = (datetime.now() + relativedelta(months=3)).strftime('%Y-%m-%d')
             else:
-                end_date = start_date  # Если duration не распознан, устанавливаем end_date равным start_date
+                end_date = start_date  # На случай, если duration не распознан
 
             data['start_date'] = start_date
             data['end_date'] = end_date
@@ -178,17 +185,33 @@ async def set_times(callback_query: types.CallbackQuery, state: FSMContext):
             await save_medicine_reminder(data, callback_query.from_user.id)
             await callback_query.message.answer("Напоминание успешно сохранено!")
             await state.finish()
-            await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+            await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_reminders_menu_keyboard())
 
 # Обработчик для просмотра напоминаний
 async def view_reminders(callback_query: types.CallbackQuery):
-    reminders = get_active_reminders()
+    user_id = callback_query.from_user.id  # Получаем user_id из callback_query
+    reminders = get_active_reminders(user_id)
+    
     if not reminders:
         await callback_query.message.answer("У вас нет активных напоминаний.")
-        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_start_keyboard())
+        await callback_query.message.answer("Что вы хотите сделать?", reply_markup=get_reminders_menu_keyboard())
         return
 
-    await callback_query.message.answer("Ваши активные напоминания:", reply_markup=get_reminders_keyboard(reminders))
+    # Получаем временную зону пользователя
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT timezone FROM user_info WHERE user_id = ?", (user_id,))
+        timezone_result = cursor.fetchone()
+        if timezone_result:
+            user_timezone_str = timezone_result[0]  # Получаем строку временной зоны
+            user_timezone = pytz.timezone(user_timezone_str)  # Преобразуем строку в объект временной зоны
+        else:
+            user_timezone = pytz.utc  # По умолчанию используем UTC, если временная зона не указана
+
+    # Создаем клавиатуру с учетом временной зоны пользователя
+    keyboard = get_reminders_keyboard(reminders, user_timezone)
+    
+    await callback_query.message.answer("Ваши активные напоминания:", reply_markup=keyboard)
     await MedicineReminder.view_reminders.set()
 
 # Обработчик для подтверждения удаления
@@ -239,7 +262,3 @@ async def back_to_start(callback_query: types.CallbackQuery, state: FSMContext):
 async def back_to_reminders(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.answer("Меню напоминаний:", reply_markup=get_reminders_menu_keyboard())
     await state.finish()
-
-
-
-
