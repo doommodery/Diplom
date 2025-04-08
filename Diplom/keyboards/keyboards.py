@@ -1,11 +1,14 @@
 import logging
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from datetime import datetime, date
 import pytz
-from datetime import datetime
 from config import SERVER_TIMEZONE
 
 # Инициализация логирования
 logging.basicConfig(level=logging.INFO)
+
+def create_reply_keyboard(buttons, row_width=2, resize=True):
+    return ReplyKeyboardMarkup(resize_keyboard=resize, row_width=row_width).add(*buttons)
 
 def create_inline_keyboard(buttons, row_width=2):
     keyboard = InlineKeyboardMarkup(row_width=row_width)
@@ -170,3 +173,25 @@ def get_edit_stock_keyboard():
         InlineKeyboardButton("Назад", callback_data="back_pills")
     ]
     return create_inline_keyboard(buttons)
+
+# Клавиатуры для личных данных
+def get_birth_year_keyboard():
+    current_year = datetime.now().year
+    years = [str(y) for y in range(current_year - 100, current_year - 10)]
+    buttons = [KeyboardButton(y) for y in years[-20:]]  # Последние 20 лет
+    buttons.append(KeyboardButton("Другие года..."))
+    return create_reply_keyboard(buttons, row_width=5)
+
+def get_full_years_keyboard():
+    current_year = datetime.now().year
+    years = [str(y) for y in range(current_year - 100, current_year - 10)]
+    buttons = [KeyboardButton(y) for y in years]
+    return create_reply_keyboard([buttons[i:i+10] for i in range(0, len(buttons), 10)], row_width=5)
+
+def get_birth_month_keyboard():
+    months = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", 
+              "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+    return create_reply_keyboard([KeyboardButton(m) for m in months], row_width=4)
+
+def get_birth_day_keyboard():
+    return create_reply_keyboard([KeyboardButton(str(d)) for d in range(1, 32)], row_width=7)
