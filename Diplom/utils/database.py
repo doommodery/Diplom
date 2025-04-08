@@ -3,7 +3,7 @@ import logging
 import asyncio
 import pytz
 from datetime import datetime
-from config import DB_PATH,SERVER_TIMEZONE
+from config import DB_PATH, SERVER_TIMEZONE
 
 # Инициализация логирования
 logging.basicConfig(level=logging.INFO)
@@ -37,12 +37,13 @@ def init_db():
                             pack_count INTEGER
                         )''')
 
-        # Создание таблицы для личных данных пользователя
+        # Создание таблицы для личных данных пользователя 
         cursor.execute('''CREATE TABLE IF NOT EXISTS user_info (
                             user_id INTEGER PRIMARY KEY,
                             role TEXT DEFAULT 'user',
                             timezone TEXT,
-                            health_info TEXT
+                            birth_date INTEGER,
+                            chronic_conditions TEXT
                         )''')
         
         cursor.execute('''CREATE TABLE IF NOT EXISTS user_condition_analysis (
@@ -50,8 +51,11 @@ def init_db():
                             user_id INTEGER NOT NULL,
                             user_condition TEXT NOT NULL,
                             weather_condition TEXT,
-                            analysis_results TEXT DEFAULT '-',
-                            date_an TEXT NOT NULL
+                            doctor TEXT,
+                            diagnosis TEXT,
+                            date_an TEXT NOT NULL,
+                            chronic_conditions TEXT,
+                            age INTEGER      
                         )''')
 
         conn.commit()
@@ -65,10 +69,10 @@ async def save_medicine_reminder(data, user_id):
     name = data.get('name', '')
     notes = data.get('notes', '')
     duration = data.get('duration', '')
-    days = ','.join(data.get('days_of_week', []))  # Преобразуем список дней в строку
+    days = ','.join(data.get('days_of_week', []))  #
     dose_count = data.get('doses_per_day', 0)
-    times = data.get('times', [])  # Получаем список времен
-    dosage = data.get('dosage', 1)  # Получаем значение дозировки, по умолчанию 1
+    times = data.get('times', [])  
+    dosage = data.get('dosage', 1)  
     start_date = data.get('start_date', '')
     end_date = data.get('end_date', '')
 
@@ -248,22 +252,96 @@ async def delete_medicine_stock(stock_id):
         except sqlite3.Error as e:
             logging.error(f"Ошибка при удалении запаса: {e}")
 
-async def save_user_info(user_id: int, timezone: str, health_info: str):
+async def get_user_info(user_id: int) -> dict:
+    """Получает информацию о пользователе"""
     async with db_lock:
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    INSERT INTO user_info (user_id, timezone, health_info)
-                    VALUES (?, ?, ?)
+                    SELECT user_id, role, timezone, birth_date, chronic_conditions 
+                    FROM user_info 
+                    WHERE user_id = ?
+                """, (user_id,))
+                result = cursor.fetchone()
+                
+                if result:
+                    return {
+                        'user_id': result[0],
+                        'role': result[1],
+                        'timezone': result[2],
+                        'birth_date': result[3],
+                        'chronic_conditions': result[4]
+                    }
+                return {}
+        except sqlite3.Error as e:
+            logging.error(f"Ошибка при получении данных пользователя: {e}")
+            return {}
+
+async def save_user_info(
+    user_id: int,
+    timezone: str,
+    birth_date: str,  
+    chronic_conditions: str
+):
+    async with db_lock:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO user_info (user_id, timezone, birth_date, chronic_conditions)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT(user_id) DO UPDATE SET
                         timezone = excluded.timezone,
-                        health_info = excluded.health_info
-                """, (user_id, timezone, health_info))
+                        birth_date = excluded.birth_date,
+                        chronic_conditions = excluded.chronic_conditions
+                """, (user_id, timezone, birth_date, chronic_conditions))
                 conn.commit()
-            logging.info(f"Личные данные пользователя {user_id} сохранены.")
+            logging.info(f"Данные пользователя {user_id} сохранены/обновлены.")
         except sqlite3.Error as e:
-            logging.error(f"Ошибка при сохранении личных данных: {e}")
+            logging.error(f"Ошибка при сохранении данных пользователя: {e}")
+
+async def update_user_health_info(
+    user_id: int, 
+    birth_year: int = None, 
+    chronic_conditions: str = None
+):
+    """Обновляет только информацию о здоровье пользователя"""
+    async with db_lock:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                
+                # Получаем текущие данные
+                current_data = await get_user_info(user_id)
+                if not current_data:
+                    raise ValueError("Пользователь не найден")
+                
+                # Обновляем только переданные поля
+                new_birth_year = birth_year if birth_year is not None else current_data.get('birth_year')
+                new_chronic_conditions = chronic_conditions if chronic_conditions is not None else current_data.get('chronic_conditions')
+                
+                cursor.execute("""
+                    UPDATE user_info
+                    SET birth_year = ?, chronic_conditions = ?
+                    WHERE user_id = ?
+                """, (new_birth_year, new_chronic_conditions, user_id))
+                conn.commit()
+            logging.info(f"Информация о здоровье пользователя {user_id} обновлена.")
+        except (sqlite3.Error, ValueError) as e:
+            logging.error(f"Ошибка при обновлении информации о здоровье: {e}")
+
+async def delete_user_info(user_id: int):
+    """Удаляет информацию о пользователе"""
+    async with db_lock:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM user_info WHERE user_id = ?", (user_id,))
+                conn.commit()
+            logging.info(f"Данные пользователя {user_id} удалены.")
+        except sqlite3.Error as e:
+            logging.error(f"Ошибка при удалении данных пользователя: {e}")
         
 async def delete_old_user_info(user_id: int):
     async with db_lock:
