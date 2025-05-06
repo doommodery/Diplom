@@ -1,16 +1,22 @@
+# ================== base imports ==================
+import sqlite3, datetime, asyncio, logging, requests, torch
+import pandas as pd
+import os
+import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
+import seaborn as sns
+# ================== enhanced imports ==================
 from aiogram import types, Dispatcher
 from aiogram.types import InputFile
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-import sqlite3, datetime, asyncio, logging, requests, torch
-import pandas as pd
-from keyboards.keyboards import get_start_keyboard, get_health_keyboard, get_report_days_keyboard
-from config import DB_PATH, WEATHER_API_KEY
-from datetime import date
-import os
 from utils.model_utils import AIModel
-import re
-from generation_sentetic_data import SYMPTOMS,CHRONIC_CONDITIONS
+from io import BytesIO
+# ================== From other files ==================
+from validation import ImprovedSymptomAnalyzer
+from config import DB_PATH, WEATHER_API_KEY
+from generation_sentetic_data import SYMPTOMS
+from keyboards.keyboards import get_start_keyboard, get_health_keyboard, get_report_days_keyboard
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -20,42 +26,48 @@ logger = logging.getLogger(__name__)
 class HealthConditionState(StatesGroup):
     waiting_for_condition = State()
     waiting_for_analysis = State()
-    waiting_for_weather = State()
 
 class ReportState(StatesGroup):
     waiting_for_days = State()
 
-import difflib
-from typing import Dict, Optional, Tuple
-
 async def process_health_analysis(message: types.Message, state: FSMContext):
-    """Обработка анализа состояния здоровья с сохранением состояния"""
-    try:
-        user_id = message.from_user.id
-        health_text = message.text
-        
-        # Проверяем, было ли предыдущее сообщение с просьбой уточнить
-        async with state.proxy() as data:
-            if data.get('awaiting_clarification'):
-                # Это ответ на просьбу уточнить
-                data['awaiting_clarification'] = False
-                health_text = message.text  # Используем новый текст
-            else:
-                # Первое сообщение - валидируем
-                validated = validate_symptoms(health_text)
-                if not validated:
-                    await suggest_better_description(message, state)
-                    return
-        # Получаем модель и проверяем доступность
-        ai_model = await AIModel.get_instance()
-        if not ai_model.is_ready:
-            await message.answer("⚠️ Система анализа временно недоступна.")
-            return
+    user_id = message.from_user.id
+    user_input = message.text
+    logger.info(f"Начало анализа для пользователя {user_id}, текст: '{user_input}'")
 
-        user_id = message.from_user.id
-        health_text = message.text
+    try:
+        # Инициализация анализатора с логированием
+        logger.info("Инициализация анализатора симптомов...")
+        analyzer = ImprovedSymptomAnalyzer(
+            use_llm=True,
+            symptom_threshold=0.65,
+            condition_threshold=0.8
+        )
         
-        # Получаем данные пользователя
+        # Анализ симптомов с логированием метода
+        logger.info("Анализ симптомов...")
+        symptoms = analyzer.analyze_symptoms(user_input)
+        if analyzer.use_llm:
+            logger.info("Анализ симптомов: использована LLM модель")
+        else:
+            logger.warning("Анализ симптомов: использован локальный метод (ключевые слова)")
+        
+        # Анализ хронических состояний с логированием метода
+        logger.info("Анализ хронических состояний...")
+        chronic = analyzer.analyze_conditions(user_input)
+        if analyzer.use_llm:
+            logger.info("Анализ хронических состояний: использована LLM модель")
+        else:
+            logger.warning("Анализ хронических состояний: использован локальный метод (ключевые слова)")
+        
+        # Очистка результатов
+        symptoms = [s for s in symptoms if s != "Не обнаружено"]
+        chronic = [c for c in chronic if c != "Не обнаружено"]
+        
+        logger.info(f"Результаты анализа - симптомы: {symptoms}, хронические: {chronic}")
+
+        # Получаем данные пользователя из БД
+        logger.debug("Получение данных пользователя из БД...")
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -65,209 +77,137 @@ async def process_health_analysis(message: types.Message, state: FSMContext):
             user_info = cursor.fetchone()
             
             if not user_info:
-                await message.answer("Сначала заполните информацию в профиле.")
+                logger.error("Данные пользователя не найдены в БД")
+                await message.answer("❌ Сначала заполните информацию в профиле.")
                 await state.finish()
                 return
 
-            timezone, birth_date, chronic_conditions = user_info
-            age = birth_date if birth_date else None
+            timezone, birth_date, existing_chronic = user_info
             
-            # Валидация симптомов
-            validated_symptoms = validate_symptoms(health_text)
-            if not validated_symptoms:
-                await suggest_better_description(message)
+            # Обработка хронических заболеваний с логированием
+            logger.debug("Обработка хронических заболеваний...")
+            final_chronic = existing_chronic if existing_chronic and existing_chronic != "-" else "-"
+            if chronic:
+                chronic_str = ", ".join(chronic)
+                final_chronic = f"{existing_chronic}, {chronic_str}" if existing_chronic and existing_chronic != "-" else chronic_str
+                logger.info(f"Обновленные хронические заболевания: {final_chronic}")
+
+            # Получение данных о погоде с логированием
+            weather_cond = "не определено"
+            if timezone:
+                try:
+                    city = timezone.split("/")[-1].replace("_", " ")
+                    logger.info(f"Запрос погоды для города: {city}")
+                    weather = await get_weather_data(city)
+                    weather_cond = weather.split(',')[0] if weather else "не удалось получить"
+                    logger.info(f"Получены погодные условия: {weather_cond}")
+                except Exception as e:
+                    logger.error(f"Ошибка получения погоды: {str(e)}")
+
+            # Подготовка данных для AI модели
+            symptoms_str = ", ".join(symptoms) if symptoms else "Чувствую себя хорошо"
+            logger.debug(f"Подготовленные симптомы для AI модели: {symptoms_str}")
+            
+            ai_model = await AIModel.get_instance()
+            if not ai_model.is_ready:
+                logger.error("AI модель не готова к работе")
+                await message.answer("⚠️ Система анализа временно недоступна.")
                 return
-            
-            # Валидация хронических состояний
-            chronic = chronic_conditions if chronic_conditions else "-"
-            validated_chronic = validate_chronic_conditions(chronic)
-            
-            # Получаем погодные данные
-            city = get_city_by_timezone(timezone)
-            weather = await get_weather_data(city)
-            weather_cond = weather.split(',')[0] if weather else "нормальные"
 
-            # Подготовка данных для модели
-            inputs = ai_model.tokenizer(
-                health_text,
-                padding=True,
-                truncation=True,
-                max_length=512,
-                return_tensors="pt"
-            ).to(ai_model.device)
-
-            # Подготовка дополнительных признаков
-            input_df = pd.DataFrame({
-                'Возраст': [age] if age else [0],
-                'Хронические состояния': [validated_chronic],
-                'Погодные условия': [weather_cond]
-            })
-
-            # Преобразование признаков
             try:
+                logger.info("Запуск AI модели для диагностики...")
+                # Создаем DataFrame с дополнительными признаками
+                input_df = pd.DataFrame({
+                    'Возраст': [birth_date] if birth_date else [0],
+                    'Хронические состояния': [final_chronic],
+                    'Погодные условия': [weather_cond]
+                })
+
+                # Преобразуем признаки
                 additional_features = ai_model.preprocessor.transform(input_df)
-                if hasattr(additional_features, "toarray"):
-                    additional_features = additional_features.toarray()
-                features_tensor = torch.tensor(additional_features, dtype=torch.float).to(ai_model.device)
+                features_tensor = torch.tensor(
+                    additional_features.toarray() if hasattr(additional_features, "toarray") else additional_features,
+                    dtype=torch.float
+                ).to(ai_model.device)
+
+                # Токенизация текста симптомов
+                inputs = ai_model.tokenizer(
+                    symptoms_str,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt"
+                ).to(ai_model.device)
+
+                # Получение предсказаний
+                with torch.no_grad():
+                    diagnosis_logits, doctor_logits = ai_model.model(
+                        input_ids=inputs['input_ids'],
+                        attention_mask=inputs['attention_mask'],
+                        additional_features=features_tensor
+                    )
+
+                diagnosis = ai_model.diagnosis_encoder.inverse_transform([torch.argmax(diagnosis_logits).item()])[0]
+                doctor = ai_model.doctor_encoder.inverse_transform([torch.argmax(doctor_logits).item()])[0]
+                logger.info(f"Результаты AI модели - диагноз: {diagnosis}, врач: {doctor}")
+
             except Exception as e:
-                logger.error(f"Ошибка преобразования признаков: {e}")
-                await message.answer("⚠️ Ошибка обработки данных.")
+                logger.error(f"Ошибка AI модели: {str(e)}")
+                await message.answer("⚠️ Ошибка анализа данных.")
                 return
-
-            # Предсказание
-            with torch.no_grad():
-                diagnosis_logits, doctor_logits = ai_model.model(
-                    input_ids=inputs['input_ids'],
-                    attention_mask=inputs['attention_mask'],
-                    additional_features=features_tensor
-                )
-
-            # Обработка результатов
-            diagnosis = ai_model.diagnosis_encoder.inverse_transform([torch.argmax(diagnosis_logits).item()])[0]
-            doctor = ai_model.doctor_encoder.inverse_transform([torch.argmax(doctor_logits).item()])[0]
 
             # Формирование ответа
-            response = format_response(
-                diagnosis=diagnosis,
-                doctor=doctor,
-                age=age,
-                chronic=validated_chronic,
-                weather=weather_cond
+            response = (
+                f"🔍 Результаты анализа:\n\n"
+                f"📋 Симптомы: {symptoms_str}\n\n"
+                f"🩺 Предварительное заключение: {diagnosis}\n\n"
+                f"👨‍⚕️ Рекомендуется консультация: {doctor}\n\n"
+                f"📌 Дополнительная информация:\n"
+                f"• Возраст: {birth_date if birth_date else 'не указан'}\n"
+                f"• Хронические состояния: {final_chronic if final_chronic != '-' else 'не указаны'}\n"
+                f"• Погодные условия: {weather_cond}\n"
             )
 
-            # Сохранение в БД
-            cursor.execute('''
-                INSERT INTO user_condition_analysis 
-                (user_id, user_condition, weather_condition, doctor, diagnosis, date_an, chronic_conditions, age)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                user_id, health_text, weather, doctor, diagnosis, 
-                datetime.datetime.now().strftime("%Y-%m-%d"), 
-                chronic_conditions, age
-            ))
-            conn.commit()
+            # Сохранение результатов в БД
+            try:
+                logger.debug("Сохранение результатов в БД...")
+                cursor.execute('''
+                    INSERT INTO user_condition_analysis 
+                    (user_id, user_condition, weather_condition, doctor, diagnosis, date_an, chronic_conditions, age)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    user_id, symptoms_str, weather_cond, doctor, diagnosis, 
+                    datetime.datetime.now().strftime("%Y-%m-%d"), 
+                    final_chronic, birth_date
+                ))
+                conn.commit()
+                logger.info("Результаты успешно сохранены в БД")
+            except sqlite3.Error as e:
+                logger.error(f"Ошибка сохранения в БД: {str(e)}")
 
         await message.answer(response, reply_markup=get_health_keyboard())
+        logger.info("Анализ успешно завершен")
 
     except Exception as e:
-        logger.error(f"Ошибка анализа: {e}", exc_info=True)
-        await message.answer("⚠️ Произошла ошибка при анализе.")
+        logger.error(f"Критическая ошибка в процессе анализа: {str(e)}", exc_info=True)
+        await message.answer(
+            "⚠️ Произошла непредвиденная ошибка.\n"
+            "Попробуйте описать симптомы более подробно или повторите позже."
+        )
     finally:
-        if not (await state.get_data()).get('awaiting_clarification'):
-            await state.finish()
-
-def validate_symptoms(text: str, threshold: float = 0.7) -> Optional[Dict]:
-    """Валидация симптомов против эталонного списка"""
-    normalized_text = normalize_text(text)
-    
-    # Проверка точных совпадений
-    for symptom, data in SYMPTOMS.items():
-        if symptom.lower() in normalized_text:
-            return data
-    
-    # Проверка схожести по расстоянию Левенштейна
-    best_match = None
-    highest_ratio = 0
-    
-    for symptom in SYMPTOMS.keys():
-        ratio = difflib.SequenceMatcher(
-            None, 
-            normalize_text(symptom), 
-            normalized_text
-        ).ratio()
+        await state.finish()
+        logger.info("Состояние FSM завершено")
         
-        if ratio > highest_ratio:
-            highest_ratio = ratio
-            best_match = symptom
-    
-    if highest_ratio >= threshold:
-        return SYMPTOMS[best_match]
-    
-    return None
-
-def validate_chronic_conditions(conditions: str) -> str:
-    """Валидация хронических состояний"""
-    if not conditions or conditions == "-":
-        return "-"
-    
-    # Разделяем условия, если их несколько
-    conditions_list = [c.strip() for c in conditions.split(",")]
-    validated = []
-    
-    for condition in conditions_list:
-        # Проверка точных совпадений
-        if condition in CHRONIC_CONDITIONS:
-            validated.append(condition)
-            continue
-        
-        # Поиск похожих
-        best_match = None
-        highest_ratio = 0
-        
-        for chronic_condition in CHRONIC_CONDITIONS.keys():
-            ratio = difflib.SequenceMatcher(
-                None, 
-                normalize_text(chronic_condition), 
-                normalize_text(condition)
-            ).ratio()
-            
-            if ratio > highest_ratio:
-                highest_ratio = ratio
-                best_match = chronic_condition
-        
-        if highest_ratio > 0.6:  # Более низкий порог для медицинских терминов
-            validated.append(best_match)
-    
-    return ", ".join(validated) if validated else "-"
-
-def normalize_text(text: str) -> str:
-    """Нормализация текста для сравнения"""
-    text = text.lower().strip()
-    # Удаление пунктуации и лишних пробелов
-    text = " ".join(re.sub(r"[^а-яё\s]", "", text).split())
-    return text
-
-async def suggest_better_description(message: types.Message, state: FSMContext):
-    """Предложение пользователю уточнить описание с сохранением состояния"""
-    examples = [
-        "• Головная боль и тошнота",
-        "• Чувствую себя хорошо",
-        "• Шум в ушах",
-        "• Двоение в глазах,Боль в глазах"
-    ]
-    
-    await state.update_data(awaiting_clarification=True)
-    
-    await message.answer(
-        "Пожалуйста, опишите симптомы более конкретно:\n"
-        "1. Что именно беспокоит (например, боль, температура)\n"
-        "2. Дополнительные симптомы\n\n"
-        "Примеры:\n" + "\n".join(examples),
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-
-def format_response(
-    diagnosis: str, 
-    doctor: str, 
-    age: Optional[int],
-    chronic: str,
-    weather: str
-) -> str:
-    """Форматирование ответа пользователю"""
-    response = [
-        "🔍 Результаты анализа:\n",
-        f"🩺 Предварительный диагноз: {diagnosis}",
-        f"👨‍⚕️ Рекомендуемый специалист: {doctor}",
-        "\n📌 Дополнительная информация:"
-    ]
-    
-    if age:
-        response.append(f"• Возраст: {age}")
-    
-    response.append(f"• Хронические состояния: {chronic if chronic != '-' else 'нет'}")
-    response.append(f"• Погодные условия: {weather}")
-    
-    return "\n".join(response)
+async def get_weather_data(city: str) -> str:
+    """Получение данных о погоде"""
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+    try:
+        response = await asyncio.to_thread(requests.get, url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return f"{data['weather'][0]['description']}, {data['main']['temp']}°C, {data['main']['humidity']}%"
+    except Exception:
+        return "Не удалось получить данные о погоде."
 
 async def delete_old_records():
     """Удаление старых записей (старше 60 дней)"""
@@ -284,40 +224,46 @@ async def delete_old_records():
             logger.error(f"Ошибка при удалении старых записей: {e}")
             await asyncio.sleep(3600)  # Повтор через час при ошибке
 
-def get_city_by_timezone(timezone: str) -> str:
-    """Получение города из временной зоны"""
-    return timezone.split("/")[-1].replace("_", " ") if timezone else "Moscow"
-
-async def get_weather_data(city: str) -> str:
-    """Асинхронное получение данных о погоде"""
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-    try:
-        response = await asyncio.to_thread(requests.get, url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            weather = data["weather"][0]["description"]
-            temp = data["main"]["temp"]
-            humidity = data["main"]["humidity"]
-            return f"{weather}, {temp}°C, {humidity}%"
-    except Exception as e:
-        logger.error(f"Ошибка получения погоды: {e}")
-    return "Не удалось получить данные о погоде."
-
 async def generate_report(records, user_id: int, start_date: str, end_date: str):
-    """Генерация отчетов в CSV и TXT форматах"""
+    """Генерация отчетов с улучшенной визуализацией"""
     try:
+        # 1. Подготовка данных
         df = pd.DataFrame(records, columns=[
-        "Состояние здоровья", "Погодные условия", "Дата", 
-        "Диагноз", "Хронические заболевания", "Возраст", "Рекомендованный врач"
+            "Состояние здоровья", "Погодные условия", "Дата", 
+            "Диагноз", "Хронические заболевания", "Возраст", "Рекомендованный врач"
         ])
         
-        csv_filename = f"reports/health_report_{user_id}_{start_date}_to_{end_date}.csv"
-        txt_filename = f"reports/health_report_{user_id}_{start_date}_to_{end_date}.txt"
+        # Анализ симптомов
+        analyzer = ImprovedSymptomAnalyzer()
+        all_symptoms = []
+        symptom_details = []
         
+        for _, row in df.iterrows():
+            symptoms = analyzer.analyze_symptoms(row['Состояние здоровья'])
+            for symptom in symptoms:
+                all_symptoms.append(symptom)
+                symptom_details.append({
+                    'Дата': row['Дата'],
+                    'Симптом': symptom,
+                    'Категория': next((cat for cat in SYMPTOMS.keys() if symptom in SYMPTOMS[cat]), 'Другое')
+                })
+        
+        # Создаем директорию для отчетов
         os.makedirs("reports", exist_ok=True)
-        df.to_csv(csv_filename, index=False, encoding="utf-8")
+        base_filename = f"reports/health_report_{user_id}_{start_date}_to_{end_date}"
         
+        # 2. Текстовый отчет с топом симптомов
+        txt_filename = f"{base_filename}.txt"
         with open(txt_filename, "w", encoding="utf-8") as f:
+            # Статистика по симптомам
+            if all_symptoms:
+                symptom_counts = pd.Series(all_symptoms).value_counts()
+                f.write("📊 Топ 5 самых частых симптомов:\n")
+                for symptom, count in symptom_counts.head(5).items():
+                    f.write(f"- {symptom}: {count} раз(а)\n")
+                f.write("\n")
+            
+            # Оригинальные записи
             for record in records:
                 f.write(
                     f"{record[2]}: Состояние: {record[0]}\n"
@@ -326,9 +272,76 @@ async def generate_report(records, user_id: int, start_date: str, end_date: str)
                     f"Врач: {record[6]}\n\n"
                 )
         
-        return InputFile(csv_filename), InputFile(txt_filename)
+        # 3. Визуализации (только если есть симптомы)
+        image_files = []
+        if symptom_details:
+            symptom_df = pd.DataFrame(symptom_details)
+            
+            # A. График симптомов по дням
+            plt.figure(figsize=(12, 6))
+            
+            # Группируем по дате и симптому
+            daily_symptoms = symptom_df.groupby(['Дата', 'Симптом']).size().unstack().fillna(0)
+            
+            # Сортируем по частоте симптомов
+            top_symptoms = symptom_df['Симптом'].value_counts().index[:5]  # Топ 5 симптомов
+            daily_symptoms = daily_symptoms[top_symptoms]
+            
+            # Построение графика
+            daily_symptoms.plot(kind='bar', stacked=True, ax=plt.gca(), width=0.8)
+            plt.title(f'Динамика симптомов по дням\n{start_date} - {end_date}')
+            plt.ylabel('Количество упоминаний')
+            plt.xlabel('Дата')
+            plt.xticks(rotation=45, ha='right')
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.legend(title='Симптомы', bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+            
+            buf1 = BytesIO()
+            plt.savefig(buf1, format='png', dpi=120, bbox_inches='tight')
+            buf1.seek(0)
+            plt.close()
+            image_files.append(('symptoms_by_day.png', buf1))
+            
+            # B. Улучшенная тепловая карта
+            plt.figure(figsize=(10, 6))
+            
+            # Группируем по категориям и датам
+            heatmap_data = symptom_df.groupby(['Дата', 'Категория']).size().unstack().fillna(0)
+            
+            # Нормализуем для лучшей визуализации
+            heatmap_data = heatmap_data.div(heatmap_data.sum(axis=1), axis=0)
+            
+            sns.heatmap(
+                heatmap_data.T,
+                cmap='YlOrRd',
+                annot=True, fmt='.1%',
+                linewidths=.5,
+                cbar_kws={'label': 'Доля симптомов'}
+            )
+            plt.title('Распределение симптомов по категориям и дням')
+            plt.xlabel('Дата')
+            plt.ylabel('Категория симптомов')
+            plt.tight_layout()
+            
+            buf2 = BytesIO()
+            plt.savefig(buf2, format='png', dpi=120)
+            buf2.seek(0)
+            plt.close()
+            image_files.append(('symptoms_heatmap.png', buf2))
+        
+        # 4. CSV отчет (как раньше)
+        csv_filename = f"{base_filename}.csv"
+        df.to_csv(csv_filename, index=False, encoding="utf-8")
+        
+        return (
+            InputFile(csv_filename),
+            InputFile(txt_filename),
+            *[InputFile(buf, filename=name) for name, buf in image_files]
+        )
+        
     except Exception as e:
-        logger.error(f"Ошибка генерации отчета: {e}")
+        logger.error(f"Ошибка генерации отчета: {e}", exc_info=True)
         raise
 
 async def start_health_entry(callback_query: types.CallbackQuery):
@@ -422,7 +435,7 @@ async def process_report_days(update: types.Message | types.CallbackQuery, state
             FROM user_condition_analysis 
             WHERE user_id = ? AND date_an BETWEEN ? AND ?
             ORDER BY date_an DESC
-            ''', (user_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")))
+        ''', (user_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")))
         
         records = cursor.fetchall()
         conn.close()
@@ -432,14 +445,21 @@ async def process_report_days(update: types.Message | types.CallbackQuery, state
             await state.finish()
             return
 
-        csv_report, txt_report = await generate_report(
+        # Генерация отчетов (теперь возвращает до 4 файлов)
+        report_files = await generate_report(
             records, user_id, 
             start_date.strftime("%Y-%m-%d"), 
             end_date.strftime("%Y-%m-%d")
         )
-
-        await message.answer_document(csv_report, caption=f"Отчет за {days} дней (CSV)")
-        await message.answer_document(txt_report, caption=f"Отчет за {days} дней (TXT)")
+        
+        # Отправка файлов (сохраняем старую логику для txt)
+        await message.answer_document(report_files[1], caption=f"Отчет за {days} дней (TXT)")
+        
+        # Если есть графики - отправляем их
+        if len(report_files) > 2:
+            await message.answer("📊 Дополнительные визуализации:")
+            await message.answer_document(report_files[2], caption="График частоты симптомов")
+            await message.answer_document(report_files[3], caption="Тепловая карта симптомов")
         
     except Exception as e:
         logger.error(f"Ошибка формирования отчета: {e}")
@@ -462,6 +482,10 @@ async def process_days_input(message: types.Message, state: FSMContext):
         await process_report_days(message, state)
     except ValueError:
         await message.answer("Пожалуйста, введите число дней.")
+
+def get_city_by_timezone(timezone: str) -> str:
+    """Получение города из временной зоны"""
+    return timezone.split("/")[-1].replace("_", " ") if timezone else "Moscow"
 
 # Обработчики кнопок
 async def report_1_day(callback_query: types.CallbackQuery, state: FSMContext):
