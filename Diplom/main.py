@@ -4,8 +4,9 @@ from aiogram import Bot, Dispatcher, executor
 from config import BOT_TOKEN
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from handlers.health_condition_handler import delete_old_records
+from core.health_condition import delete_old_records
 import torch
+from utils import reminder_run
 from utils.model_utils import AIModel
 
 # Инициализация хранилища состояний
@@ -48,14 +49,11 @@ async def on_startup(dp):
 
         # Регистрация обработчиков
         from handlers import (
-            start_handler,
-            reminder_handler,
-            health_condition_handler
+            start_handler
         )
         
         start_handler.register_handlers_start(dp)
-        reminder_handler.register_handlers_reminder(dp, bot, scheduler)
-        health_condition_handler.register_handlers_health(dp)
+        reminder_run.register_handlers_reminder(dp, bot, scheduler)
         
         logger.info("Все обработчики зарегистрированы")
 
