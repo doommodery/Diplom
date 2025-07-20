@@ -189,6 +189,15 @@ def preprocess_data(df, tokenizer, label_encoders=None, chronic_encoder=None, ag
         chronic_features
     ]).astype(np.float32)
 
+    # Создаем информацию о признаках
+    feature_info = {
+        'age_groups': ['0-25', '25-60', '60-90'],
+        'temp_groups': ['low', 'normal', 'high'],
+        'chronic_conditions': list(chronic_encoder.classes_),
+        'num_additional_features': additional_features.shape[1],
+        'feature_names': ['age_normalized', 'temp_normalized'] + list(chronic_encoder.classes_)
+    }
+
     df['Рекомендуемый врач'] = df['Рекомендуемый врач'].fillna('-').replace('-', '(нет врача)')
 
     if label_encoders is None:
@@ -211,7 +220,8 @@ def preprocess_data(df, tokenizer, label_encoders=None, chronic_encoder=None, ag
         (label_encoder_diagnosis, label_encoder_doctor),
         chronic_encoder,
         age_scaler,
-        temp_scaler
+        temp_scaler,
+        feature_info
     )
 
 def evaluate_model(model, dataset, device="cuda"):
@@ -240,9 +250,14 @@ def evaluate_model(model, dataset, device="cuda"):
 
     return metrics
 
-def save_components(model, tokenizer, label_encoders, config, output_dir, chronic_encoder, age_scaler, temp_scaler):
+def save_components(model, tokenizer, label_encoders, config, output_dir, chronic_encoder, age_scaler, temp_scaler, feature_info):
     os.makedirs(output_dir, exist_ok=True)
 
+    # Сохраняем информацию о признаках
+    joblib.dump(feature_info, os.path.join(output_dir, 'feature_info.pkl'))
+    logger.info(f"Файл feature_info.pkl создан в {output_dir}")
+
+    # Сохраняем остальные компоненты модели
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     config.save_pretrained(output_dir)
@@ -260,24 +275,24 @@ def main():
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
     logger.info("Загрузка данных из medical_dataset.csv...")
-    full_data = pd.read_csv("medical_dataset.csv")
+    full_data = pd.read_csv("medical_dataset1.csv")
 
     logger.info("Разделение данных на train/val/test...")
-    train_val_data = full_data.iloc[:-15000]
-    test_data = full_data.iloc[-15000:]
+    train_val_data = full_data.iloc[:-2000]
+    test_data = full_data.iloc[-2000:]
     train_data, val_data = train_test_split(train_val_data, test_size=0.1, random_state=42)
 
     logger.info("Предобработка тренировочных данных...")
     (train_encodings, train_features, train_diag_labels, train_doc_labels, 
-     label_encoders, chronic_encoder, age_scaler, temp_scaler) = preprocess_data(train_data, tokenizer)
+     label_encoders, chronic_encoder, age_scaler, temp_scaler, feature_info) = preprocess_data(train_data, tokenizer)
 
     logger.info("Предобработка валидационных данных...")
     (val_encodings, val_features, val_diag_labels, val_doc_labels, 
-     _, _, _, _) = preprocess_data(val_data, tokenizer, label_encoders, chronic_encoder, age_scaler, temp_scaler)
+     _, _, _, _, _) = preprocess_data(val_data, tokenizer, label_encoders, chronic_encoder, age_scaler, temp_scaler)
 
     logger.info("Предобработка тестовых данных...")
     (test_encodings, test_features, test_diag_labels, test_doc_labels, 
-     _, _, _, _) = preprocess_data(test_data, tokenizer, label_encoders, chronic_encoder, age_scaler, temp_scaler)
+     _, _, _, _, _) = preprocess_data(test_data, tokenizer, label_encoders, chronic_encoder, age_scaler, temp_scaler)
 
     logger.info("Создание датасетов...")
     train_dataset = HealthDataset(train_encodings, train_features, train_diag_labels, train_doc_labels)
@@ -338,7 +353,17 @@ def main():
     config.num_diagnosis_labels = len(label_encoders[0].classes_)
     config.num_doctor_labels = len(label_encoders[1].classes_)
     config.num_additional_features = train_features.shape[1]
-    save_components(model, tokenizer, label_encoders, config, "./saved_model", chronic_encoder, age_scaler, temp_scaler)
+    save_components(
+        model, 
+        tokenizer, 
+        label_encoders, 
+        config, 
+        "./saved_model1", 
+        chronic_encoder, 
+        age_scaler, 
+        temp_scaler,
+        feature_info
+    )
 
     logger.info("Результаты тестирования:")
     for task in ['diagnosis', 'doctor']:
