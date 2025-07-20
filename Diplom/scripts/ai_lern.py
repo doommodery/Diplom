@@ -3,18 +3,18 @@ import torch.nn as nn
 import pandas as pd
 from torch.utils.data import Dataset
 from transformers import BertPreTrainedModel, BertModel, Trainer, TrainingArguments, BertTokenizer, AutoConfig
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder, MultiLabelBinarizer
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 import torch.nn.functional as F
 import joblib
 import os
 import logging
 from sklearn.model_selection import train_test_split
+import json
+from datetime import datetime
+import numpy as np
+from sklearn.preprocessing import StandardScaler
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,11 @@ class MultiTaskBERT(BertPreTrainedModel):
         self.num_diagnosis_labels = num_diagnosis_labels
         self.num_doctor_labels = num_doctor_labels
         self.num_additional_features = num_additional_features
-        
-        # Сохраняем параметры в конфиг для последующей загрузки
+
         config.num_diagnosis_labels = num_diagnosis_labels
         config.num_doctor_labels = num_doctor_labels
         config.num_additional_features = num_additional_features
-        
+
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.diagnosis_classifier = nn.Linear(config.hidden_size + num_additional_features, num_diagnosis_labels)
@@ -81,11 +80,16 @@ class HealthDataset(Dataset):
         }
 
 class CustomTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        if 'labels' not in inputs:
-            logger.error("Отсутствуют метки в inputs")
-            return None
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.training_history = {
+            'training_start': datetime.now().isoformat(),
+            'steps': [],
+            'validation': [],
+            'test_metrics': None
+        }
 
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
 
@@ -96,10 +100,97 @@ class CustomTrainer(Trainer):
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(logits_diagnosis, labels[:, 0]) + loss_fct(logits_doctor, labels[:, 1])
 
+        if self.state.global_step % self.args.logging_steps == 0:
+            preds_diagnosis = torch.argmax(logits_diagnosis, dim=-1)
+            accuracy_diagnosis = (preds_diagnosis == labels[:, 0]).float().mean()
+
+            preds_doctor = torch.argmax(logits_doctor, dim=-1)
+            accuracy_doctor = (preds_doctor == labels[:, 1]).float().mean()
+
+            step_metrics = {
+                'step': self.state.global_step,
+                'loss': loss.item(),
+                'diagnosis_accuracy': accuracy_diagnosis.item(),
+                'doctor_accuracy': accuracy_doctor.item(),
+                'timestamp': datetime.now().isoformat()
+            }
+            self.training_history['steps'].append(step_metrics)
+
         return (loss, (logits_diagnosis, logits_doctor)) if return_outputs else loss
 
-def preprocess_data(df, tokenizer, preprocessor=None, label_encoders=None):
-    # Инициализация или использование существующих энкодеров
+    def compute_metrics(self, eval_pred):
+        logits_diagnosis, logits_doctor = eval_pred.predictions
+        labels_diagnosis = eval_pred.label_ids[:, 0]
+        labels_doctor = eval_pred.label_ids[:, 1]
+
+        preds_diagnosis = np.argmax(logits_diagnosis, axis=-1)
+        preds_doctor = np.argmax(logits_doctor, axis=-1)
+
+        metrics = {
+            'eval_loss': None,
+            'eval_diagnosis_accuracy': accuracy_score(labels_diagnosis, preds_diagnosis),
+            'eval_doctor_accuracy': accuracy_score(labels_doctor, preds_doctor),
+            'eval_diagnosis_f1': f1_score(labels_diagnosis, preds_diagnosis, average='weighted'),
+            'eval_doctor_f1': f1_score(labels_doctor, preds_doctor, average='weighted')
+        }
+
+        eval_metrics = {
+            'step': self.state.global_step,
+            'metrics': metrics,
+            'timestamp': datetime.now().isoformat()
+        }
+        self.training_history['validation'].append(eval_metrics)
+
+        return metrics
+
+    def save_training_history(self, output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        history_file = os.path.join(output_dir, 'training_history.json')
+
+        self.training_history['training_params'] = {
+            'batch_size': self.args.per_device_train_batch_size,
+            'epochs': self.args.num_train_epochs,
+            'learning_rate': self.args.learning_rate,
+            'weight_decay': self.args.weight_decay,
+            'total_steps': self.state.max_steps
+        }
+
+        with open(history_file, 'w') as f:
+            json.dump(self.training_history, f, indent=2)
+
+        logger.info(f"История обучения сохранена в {history_file}")
+
+def preprocess_data(df, tokenizer, label_encoders=None, chronic_encoder=None, age_scaler=None, temp_scaler=None):
+    df = df.copy()
+
+    if age_scaler is None:
+        age_scaler = StandardScaler()
+        df['age_normalized'] = age_scaler.fit_transform(df[['Возраст']])
+    else:
+        df['age_normalized'] = age_scaler.transform(df[['Возраст']])
+    
+    if temp_scaler is None:
+        temp_scaler = StandardScaler()
+        df['temp_normalized'] = temp_scaler.fit_transform(df[['Температура (°C)']].fillna(0))
+    else:
+        df['temp_normalized'] = temp_scaler.transform(df[['Температура (°C)']].fillna(0))
+
+    df['Хронические состояния'] = df['Хронические состояния'].fillna('-')
+    chronic_list = df['Хронические состояния'].apply(lambda x: [s.strip() for s in x.split(',')] if x != '-' else [])
+
+    if chronic_encoder is None:
+        chronic_encoder = MultiLabelBinarizer()
+        chronic_features = chronic_encoder.fit_transform(chronic_list)
+    else:
+        chronic_features = chronic_encoder.transform(chronic_list)
+
+    additional_features = np.hstack([
+        df[['age_normalized', 'temp_normalized']].values,
+        chronic_features
+    ]).astype(np.float32)
+
+    df['Рекомендуемый врач'] = df['Рекомендуемый врач'].fillna('-').replace('-', '(нет врача)')
+
     if label_encoders is None:
         label_encoder_diagnosis = LabelEncoder()
         label_encoder_doctor = LabelEncoder()
@@ -110,29 +201,17 @@ def preprocess_data(df, tokenizer, preprocessor=None, label_encoders=None):
         df['Рекомендация'] = label_encoder_diagnosis.transform(df['Рекомендация'])
         df['Рекомендуемый врач'] = label_encoder_doctor.transform(df['Рекомендуемый врач'])
 
-    # Токенизация текста
     encodings = tokenizer(df['Состояние здоровья'].tolist(), padding=True, truncation=True, return_tensors="pt")
 
-    # Обработка дополнительных признаков
-    numeric_features = ['Возраст']
-    categorical_features = ['Хронические состояния', 'Погодные условия']
-
-    if preprocessor is None:
-        preprocessor = ColumnTransformer([ 
-            ('num', StandardScaler(), numeric_features), 
-            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
-        ])
-        additional_features = preprocessor.fit_transform(df[numeric_features + categorical_features])
-    else:
-        additional_features = preprocessor.transform(df[numeric_features + categorical_features])
-
     return (
-        encodings, 
-        additional_features.toarray(), 
-        df['Рекомендация'].tolist(), 
+        encodings,
+        additional_features,
+        df['Рекомендация'].tolist(),
         df['Рекомендуемый врач'].tolist(),
-        preprocessor,
-        (label_encoder_diagnosis, label_encoder_doctor)
+        (label_encoder_diagnosis, label_encoder_doctor),
+        chronic_encoder,
+        age_scaler,
+        temp_scaler
     )
 
 def evaluate_model(model, dataset, device="cuda"):
@@ -144,9 +223,9 @@ def evaluate_model(model, dataset, device="cuda"):
         for item in dataset:
             inputs = {k: v.unsqueeze(0).to(device) for k, v in item.items() if k != 'labels'}
             labels = item['labels'].to(device)
-            
+
             logits_diagnosis, logits_doctor = model(**inputs)
-            
+
             all_preds['diagnosis'].extend(torch.argmax(logits_diagnosis, -1).cpu().numpy())
             all_preds['doctor'].extend(torch.argmax(logits_doctor, -1).cpu().numpy())
             all_labels['diagnosis'].append(labels[0].cpu().numpy())
@@ -158,65 +237,54 @@ def evaluate_model(model, dataset, device="cuda"):
         metrics[f'{task}_f1'] = f1_score(all_labels[task], all_preds[task], average='weighted')
         metrics[f'{task}_precision'] = precision_score(all_labels[task], all_preds[task], average='weighted')
         metrics[f'{task}_recall'] = recall_score(all_labels[task], all_preds[task], average='weighted')
-    
+
     return metrics
 
-def save_components(model, tokenizer, preprocessor, label_encoders, config, output_dir):
-    """Сохраняет все компоненты модели"""
+def save_components(model, tokenizer, label_encoders, config, output_dir, chronic_encoder, age_scaler, temp_scaler):
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Сохраняем модель и токенизатор
+
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    
-    # Сохраняем конфиг (уже содержит все необходимые параметры)
     config.save_pretrained(output_dir)
-    
-    # Сохраняем препроцессор и энкодеры
-    joblib.dump(preprocessor, os.path.join(output_dir, 'preprocessor.pkl'))
+
     joblib.dump(label_encoders[0], os.path.join(output_dir, 'diagnosis_encoder.pkl'))
     joblib.dump(label_encoders[1], os.path.join(output_dir, 'doctor_encoder.pkl'))
-    
-    # Сохраняем информацию о признаках для ясности
-    feature_info = {
-        'numeric_features': ['Возраст'],
-        'categorical_features': ['Хронические состояния', 'Погодные условия'],
-        'text_feature': 'Состояние здоровья'
-    }
-    joblib.dump(feature_info, os.path.join(output_dir, 'feature_info.pkl'))
-    
+    joblib.dump(chronic_encoder, os.path.join(output_dir, 'chronic_encoder.pkl'))
+    joblib.dump(age_scaler, os.path.join(output_dir, 'age_scaler.pkl'))
+    joblib.dump(temp_scaler, os.path.join(output_dir, 'temp_scaler.pkl'))
+
     logger.info(f"Все компоненты модели сохранены в {output_dir}")
 
 def main():
-    # Инициализация
+    logger.info("Загрузка токенизатора...")
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    
-    # Загрузка и разделение данных
-    full_data = pd.read_csv("medical_dataset.csv ")
-    
-    # Разделение данных: последние 2000 строк - тестовый набор
-    train_val_data = full_data.iloc[:-2000]
-    test_data = full_data.iloc[-2000:]
-    
-    # Разделение train_val на train и validation (90%/10%)
-    train_data, val_data = train_test_split(train_val_data, test_size=0.1, random_state=42)
-    
-    # Предобработка данных
-    (train_encodings, train_features, train_diag_labels, 
-     train_doc_labels, preprocessor, label_encoders) = preprocess_data(train_data, tokenizer)
-    
-    (val_encodings, val_features, val_diag_labels, 
-     val_doc_labels, _, _) = preprocess_data(val_data, tokenizer, preprocessor, label_encoders)
-    
-    (test_encodings, test_features, test_diag_labels, 
-     test_doc_labels, _, _) = preprocess_data(test_data, tokenizer, preprocessor, label_encoders)
 
-    # Создание датасетов
+    logger.info("Загрузка данных из medical_dataset.csv...")
+    full_data = pd.read_csv("medical_dataset.csv")
+
+    logger.info("Разделение данных на train/val/test...")
+    train_val_data = full_data.iloc[:-15000]
+    test_data = full_data.iloc[-15000:]
+    train_data, val_data = train_test_split(train_val_data, test_size=0.1, random_state=42)
+
+    logger.info("Предобработка тренировочных данных...")
+    (train_encodings, train_features, train_diag_labels, train_doc_labels, 
+     label_encoders, chronic_encoder, age_scaler, temp_scaler) = preprocess_data(train_data, tokenizer)
+
+    logger.info("Предобработка валидационных данных...")
+    (val_encodings, val_features, val_diag_labels, val_doc_labels, 
+     _, _, _, _) = preprocess_data(val_data, tokenizer, label_encoders, chronic_encoder, age_scaler, temp_scaler)
+
+    logger.info("Предобработка тестовых данных...")
+    (test_encodings, test_features, test_diag_labels, test_doc_labels, 
+     _, _, _, _) = preprocess_data(test_data, tokenizer, label_encoders, chronic_encoder, age_scaler, temp_scaler)
+
+    logger.info("Создание датасетов...")
     train_dataset = HealthDataset(train_encodings, train_features, train_diag_labels, train_doc_labels)
     val_dataset = HealthDataset(val_encodings, val_features, val_diag_labels, val_doc_labels)
     test_dataset = HealthDataset(test_encodings, test_features, test_diag_labels, test_doc_labels)
 
-    # Инициализация модели
+    logger.info("Создание конфигурации и модели...")
     config = AutoConfig.from_pretrained('bert-base-uncased')
     model = MultiTaskBERT.from_pretrained(
         'bert-base-uncased',
@@ -226,53 +294,59 @@ def main():
         num_additional_features=train_features.shape[1]
     )
 
-    # Настройка обучения
+    logger.info("Установка параметров обучения...")
     training_args = TrainingArguments(
         output_dir="./results",
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        eval_strategy="steps",
+        eval_steps=2000,
+        save_strategy="steps",
+        save_steps=2000,
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         num_train_epochs=3,
         weight_decay=0.01,
         logging_dir="./logs",
-        logging_steps=10,
+        logging_steps=100,
+        report_to="none",
+        save_total_limit=1,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        learning_rate=5e-5,  
     )
 
-    # Обучение
+    logger.info("Инициализация кастомного Trainer...")
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset
+        eval_dataset=val_dataset,
     )
-    trainer.train()
 
-    # Сохранение всех компонентов модели
-    print("Размерность дополнительных признаков:", train_features.shape[1])
-    print("Количество классов диагнозов:", len(label_encoders[0].classes_))
-    print("Количество классов врачей:", len(label_encoders[1].classes_))
+    logger.info("Запуск обучения...")
+    trainer.train()
+    logger.info("Обучение завершено.")
+
+    logger.info("Сохранение истории обучения...")
+    trainer.save_training_history(training_args.output_dir)
+
+    logger.info("Оценка модели на тестовом наборе...")
+    test_metrics = evaluate_model(model, test_dataset)
+    trainer.training_history['test_metrics'] = test_metrics
+    trainer.save_training_history(training_args.output_dir)
+
+    logger.info("Сохранение компонентов модели...")
     config.num_diagnosis_labels = len(label_encoders[0].classes_)
     config.num_doctor_labels = len(label_encoders[1].classes_)
     config.num_additional_features = train_features.shape[1]
-    config.save_pretrained("./saved_model")  # Явно сохраняем обновленный конфиг
-    save_components(
-        model=model,
-        tokenizer=tokenizer,
-        preprocessor=preprocessor,
-        label_encoders=label_encoders,
-        config=config,
-        output_dir="./saved_model"
-    )
+    save_components(model, tokenizer, label_encoders, config, "./saved_model", chronic_encoder, age_scaler, temp_scaler)
 
-    # Оценка
-    metrics = evaluate_model(model, test_dataset)
+    logger.info("Результаты тестирования:")
     for task in ['diagnosis', 'doctor']:
-        print(f"\n{task.capitalize()} Metrics:")
-        print(f"Accuracy: {metrics[f'{task}_accuracy']:.4f}")
-        print(f"F1: {metrics[f'{task}_f1']:.4f}")
-        print(f"Precision: {metrics[f'{task}_precision']:.4f}")
-        print(f"Recall: {metrics[f'{task}_recall']:.4f}")
+        logger.info(f"{task.capitalize()} Metrics:")
+        logger.info(f"Accuracy: {test_metrics[f'{task}_accuracy']:.4f}")
+        logger.info(f"F1: {test_metrics[f'{task}_f1']:.4f}")
+        logger.info(f"Precision: {test_metrics[f'{task}_precision']:.4f}")
+        logger.info(f"Recall: {test_metrics[f'{task}_recall']:.4f}")
 
 if __name__ == "__main__":
-    main()  
+    main()
